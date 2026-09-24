@@ -14,11 +14,36 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import pkg_resources as pkg
 import psutil
 import torch
 from IPython import display
 from matplotlib import font_manager
+
+# NOTE: pkg_resources was removed from modern setuptools; use packaging/importlib.metadata instead.
+from importlib import metadata as importlib_metadata
+from packaging.requirements import Requirement
+from packaging.version import parse as parse_version
+
+
+class DistributionNotFound(Exception):
+    """Shim for pkg_resources.DistributionNotFound."""
+    pass
+
+
+class VersionConflict(Exception):
+    """Shim for pkg_resources.VersionConflict."""
+    pass
+
+
+def require(requirement: str):
+    """Shim for pkg_resources.require(): raise if the requirement is not met by installed packages."""
+    req = Requirement(requirement)
+    try:
+        version = importlib_metadata.version(req.name)
+    except importlib_metadata.PackageNotFoundError as e:
+        raise DistributionNotFound(str(req)) from e
+    if not req.specifier.contains(version, prereleases=True):
+        raise VersionConflict(f'{req.name} {version} does not satisfy {req.specifier}')
 
 from ultralytics.yolo.utils import (AUTOINSTALL, LOGGER, ROOT, USER_CONFIG_DIR, TryExcept, colorstr, downloads, emojis,
                                     is_colab, is_docker, is_jupyter)
@@ -108,7 +133,7 @@ def check_version(current: str = "0.0.0",
     Returns:
         bool: True if minimum version is met, False otherwise.
     """
-    current, minimum = (pkg.parse_version(x) for x in (current, minimum))
+    current, minimum = (parse_version(x) for x in (current, minimum))
     result = (current == minimum) if pinned else (current >= minimum)  # bool
     warning_message = f"WARNING ⚠️ {name}{minimum} is required by YOLOv8, but {name}{current} is currently installed"
     if hard:
@@ -185,7 +210,11 @@ def check_requirements(requirements=ROOT.parent / 'requirements.txt', exclude=()
         file = requirements.resolve()
         assert file.exists(), f"{prefix} {file} not found, check failed."
         with file.open() as f:
-            requirements = [f'{x.name}{x.specifier}' for x in pkg.parse_requirements(f) if x.name not in exclude]
+            requirements = [
+                f'{x.name}{x.specifier}' for x in (Requirement(line.split('#')[0].strip())
+                                                   for line in f if line.split('#')[0].strip())
+                if x.name not in exclude
+            ]
     elif isinstance(requirements, str):
         requirements = [requirements]
 
@@ -193,8 +222,8 @@ def check_requirements(requirements=ROOT.parent / 'requirements.txt', exclude=()
     n = 0
     for r in requirements:
         try:
-            pkg.require(r)
-        except (pkg.VersionConflict, pkg.DistributionNotFound):  # exception if requirements not met
+            require(r)
+        except (VersionConflict, DistributionNotFound):  # exception if requirements not met
             s += f'"{r}" '
             n += 1
 

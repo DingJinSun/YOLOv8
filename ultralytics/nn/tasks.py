@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from ultralytics.nn.modules import (C1, C2, C3, C3TR, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x, Classify,
                                     Concat, Conv, ConvTranspose, Detect, DWConv, DWConvTranspose2d, Ensemble, Focus,
-                                    GhostBottleneck, GhostConv, Segment)
+                                    GhostBottleneck, GhostConv, Segment, CBAM, BiFPN_Add, BiFPN_Concat)
 from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, yaml_load
 from ultralytics.yolo.utils.checks import check_requirements, check_yaml
 from ultralytics.yolo.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights,
@@ -333,7 +333,7 @@ def torch_safe_load(weight):
 
     file = attempt_download_asset(weight)  # search online if missing locally
     try:
-        return torch.load(file, map_location='cpu')  # load
+        return torch.load(file, map_location='cpu', weights_only=False)  # load
     except ModuleNotFoundError as e:
         if e.name == 'omegaconf':  # e.name is missing module name
             LOGGER.warning(f"WARNING ⚠️ {weight} requires {e.name}, which is not in ultralytics requirements."
@@ -341,7 +341,7 @@ def torch_safe_load(weight):
                            f"\nRecommend fixes are to train a new model using updated ultraltyics package or to "
                            f"download updated models from https://github.com/ultralytics/assets/releases/tag/v0.0.0")
         check_requirements(e.name)  # install missing module
-        return torch.load(file, map_location='cpu')  # load
+        return torch.load(file, map_location='cpu', weights_only=False)  # load
 
 
 def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
@@ -444,6 +444,20 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m in {CBAM}:
+            c1, c2 = ch[f], ch[f]  # CBAM doesn't change channels
+            args = [c1, *args]
+        elif m is BiFPN_Add:
+            # BiFPN weighted addition - output channels = max of input channels
+            c2 = max(ch[x] for x in f)
+            args = [c2, *args]
+        elif m is BiFPN_Concat:
+            # BiFPN weighted concatenation - output channels specified in args
+            c2 = args[0]
+            if c2 != nc:
+                c2 = make_divisible(c2 * gw, 8)
+            input_channels = [ch[x] for x in f]
+            args = [input_channels, c2, *args[1:]]
         elif m in {Detect, Segment}:
             args.append([ch[x] for x in f])
             if m is Segment:

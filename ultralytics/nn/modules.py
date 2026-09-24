@@ -229,6 +229,66 @@ class CBAM(nn.Module):
         return self.spatial_attention(self.channel_attention(x))
 
 
+class BiFPN_Add(nn.Module):
+    # Weighted addition for BiFPN - replaces Concat with learnable weighted fusion
+    def __init__(self, c2, weight_type='softmax'):  # c2=output channels, weight_type: softmax/fast_normalization
+        super().__init__()
+        self.weight_type = weight_type
+        self.weight = nn.Parameter(torch.ones(2, dtype=torch.float32), requires_grad=True)
+        self.epsilon = 1e-4
+        # Conv to adjust channels if needed (handled externally)
+        self.conv = Conv(c2, c2, 1, 1) if c2 > 0 else nn.Identity()
+
+    def forward(self, x):
+        # x is a list of [feature1, feature2] tensors (already same spatial size and channels)
+        if self.weight_type == 'softmax':
+            w = torch.softmax(self.weight, dim=0)
+            out = w[0] * x[0] + w[1] * x[1]
+        else:  # fast_normalization
+            w = torch.relu(self.weight)
+            out = (w[0] * x[0] + w[1] * x[1]) / (w.sum() + self.epsilon)
+        return self.conv(out)
+
+
+class BiFPN_Concat(nn.Module):
+    # BiFPN weighted concatenation - replaces standard Concat in neck
+    # Takes multiple feature maps, applies learnable weights, outputs weighted sum
+    def __init__(self, c1, c2, weight_type='fast_normalization'):
+        """
+        Args:
+            c1: list of input channel counts [ch1, ch2, ...]
+            c2: output channel count
+            weight_type: 'softmax' or 'fast_normalization'
+        """
+        super().__init__()
+        self.weight_type = weight_type
+        self.num_inputs = len(c1) if isinstance(c1, (list, tuple)) else 2
+        self.weight = nn.Parameter(torch.ones(self.num_inputs, dtype=torch.float32), requires_grad=True)
+        self.epsilon = 1e-4
+        # Channel adjustment convolutions for each input
+        if isinstance(c1, (list, tuple)):
+            self.channel_convs = nn.ModuleList(
+                [Conv(c, c2, 1, 1) if c != c2 else nn.Identity() for c in c1]
+            )
+        else:
+            self.channel_convs = nn.ModuleList(
+                [Conv(c1, c2, 1, 1) if c1 != c2 else nn.Identity() for _ in range(self.num_inputs)]
+            )
+
+    def forward(self, x):
+        # Adjust channels
+        adjusted = [conv(xi) for conv, xi in zip(self.channel_convs, x)]
+        
+        if self.weight_type == 'softmax':
+            w = torch.softmax(self.weight, dim=0)
+        else:  # fast_normalization
+            w = torch.relu(self.weight)
+            w = w / (w.sum() + self.epsilon)
+        
+        out = sum(w[i] * adjusted[i] for i in range(self.num_inputs))
+        return out
+
+
 class C1(nn.Module):
     # CSP Bottleneck with 1 convolution
     def __init__(self, c1, c2, n=1):  # ch_in, ch_out, number
